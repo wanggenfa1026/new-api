@@ -231,9 +231,6 @@ func setupTokenRedeemFixture(t *testing.T, tokenRemain int, unlimited bool, toke
 	}
 	cleanup()
 	t.Cleanup(cleanup)
-	oldDelay := tokenRedeemDelay
-	tokenRedeemDelay = func() {}
-	t.Cleanup(func() { tokenRedeemDelay = oldDelay })
 
 	user := User{Username: "token-redeem-user", Password: "password", Status: common.UserStatusEnabled, Quota: 1000}
 	require.NoError(t, DB.Create(&user).Error)

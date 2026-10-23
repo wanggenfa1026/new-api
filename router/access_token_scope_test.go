@@ -70,6 +70,9 @@ var accessTokenExemptRoutes = []string{
 	// API key authentication (TokenAuthReadOnly).
 	"GET /api/usage/token/",
 	"GET /api/log/token",
+
+	// API key in the Authorization header, checked by the handler itself.
+	"POST /api/token/redeem",
 }
 
 // accessTokenHelperRoutes are declared through handlePermissionRoute outside

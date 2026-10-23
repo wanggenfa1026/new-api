@@ -37,10 +37,6 @@ type TokenRedeemResult struct {
 // exists.
 var ErrTokenRedeemFailed = errors.New("token_redeem.failed")
 
-// tokenRedeemDelay runs before any lookup so that every outcome takes a
-// similar random time. Tests replace it with a no-op.
-var tokenRedeemDelay = common.RandomSleep
-
 func tokenRedeemFailure(reason string) error {
 	return fmt.Errorf("%w: %s", ErrTokenRedeemFailed, reason)
 }
@@ -48,9 +44,9 @@ func tokenRedeemFailure(reason string) error {
 // RedeemToToken credits a redemption code to the API key's owner and, unless
 // the key has unlimited quota, to the key itself. It needs no login: holding
 // the key is the credential. A code already credited to this same key returns
-// the original result again without crediting anything.
+// the original result again without crediting anything. Callers facing
+// clients should blur response timing before calling it.
 func RedeemToToken(code string, key string) (*TokenRedeemResult, error) {
-	tokenRedeemDelay()
 	code = strings.TrimSpace(code)
 	if code == "" || key == "" {
 		return nil, tokenRedeemFailure("missing code or key")
