@@ -208,3 +208,253 @@ func TestRedeemConcurrentSingleSuccess(t *testing.T) {
 	require.NoError(t, DB.First(&user, "id = ?", userId).Error)
 	assert.Equal(t, 300, user.Quota, "quota must be credited exactly once")
 }
+
+const tokenRedeemTestKey = "tokenredeemkey000000000000000000000000000000001"
+
+type tokenRedeemSnapshot struct {
+	userQuota   int
+	tokenRemain int
+	tokenStatus int
+	codeStatus  int
+	rows        int64
+}
+
+func setupTokenRedeemFixture(t *testing.T, tokenRemain int, unlimited bool, tokenStatus int) (User, Token) {
+	t.Helper()
+	require.NoError(t, DB.AutoMigrate(&Redemption{}, &TokenRedemption{}))
+	cleanup := func() {
+		require.NoError(t, DB.Session(&gorm.Session{AllowGlobalUpdate: true}).Unscoped().Delete(&Redemption{}).Error)
+		require.NoError(t, DB.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&TokenRedemption{}).Error)
+		DB.Exec("DELETE FROM tokens")
+		DB.Exec("DELETE FROM users")
+		DB.Exec("DELETE FROM logs")
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+	oldDelay := tokenRedeemDelay
+	tokenRedeemDelay = func() {}
+	t.Cleanup(func() { tokenRedeemDelay = oldDelay })
+
+	user := User{Username: "token-redeem-user", Password: "password", Status: common.UserStatusEnabled, Quota: 1000}
+	require.NoError(t, DB.Create(&user).Error)
+	token := Token{UserId: user.Id, Key: tokenRedeemTestKey, Name: "customer", Status: tokenStatus, RemainQuota: tokenRemain, UnlimitedQuota: unlimited, ExpiredTime: -1}
+	require.NoError(t, DB.Create(&token).Error)
+	return user, token
+}
+
+func createTokenRedeemCode(t *testing.T, code string, quota int, status int, expiredTime int64) Redemption {
+	t.Helper()
+	redemption := Redemption{Name: "token-redeem", Key: code, Status: status, Quota: quota, CreatedTime: common.GetTimestamp(), ExpiredTime: expiredTime}
+	require.NoError(t, DB.Create(&redemption).Error)
+	return redemption
+}
+
+func takeTokenRedeemSnapshot(t *testing.T, userId int, tokenId int, code string) tokenRedeemSnapshot {
+	t.Helper()
+	var user User
+	require.NoError(t, DB.First(&user, "id = ?", userId).Error)
+	var token Token
+	require.NoError(t, DB.First(&token, "id = ?", tokenId).Error)
+	snap := tokenRedeemSnapshot{userQuota: user.Quota, tokenRemain: token.RemainQuota, tokenStatus: token.Status, codeStatus: -1}
+	var redemption Redemption
+	if err := DB.Unscoped().Where(commonKeyCol+" = ?", code).First(&redemption).Error; err == nil {
+		snap.codeStatus = redemption.Status
+	}
+	require.NoError(t, DB.Model(&TokenRedemption{}).Count(&snap.rows).Error)
+	return snap
+}
+
+func TestRedeemToToken(t *testing.T) {
+	const code = "20000000000000000000000000000001"
+	now := common.GetTimestamp()
+
+	t.Run("limited token", func(t *testing.T) {
+		user, token := setupTokenRedeemFixture(t, 100, false, common.TokenStatusEnabled)
+		createTokenRedeemCode(t, code, 500, common.RedemptionCodeStatusEnabled, 0)
+
+		result, err := RedeemToToken(code, tokenRedeemTestKey)
+		require.NoError(t, err)
+		assert.Equal(t, TokenRedeemResult{Quota: 500, TokenId: token.Id, Unlimited: false, TokenRemainQuota: 600, Replayed: false}, *result)
+		assert.Equal(t, tokenRedeemSnapshot{userQuota: 1500, tokenRemain: 600, tokenStatus: common.TokenStatusEnabled, codeStatus: common.RedemptionCodeStatusUsed, rows: 1},
+			takeTokenRedeemSnapshot(t, user.Id, token.Id, code))
+		var redemption Redemption
+		require.NoError(t, DB.Where(commonKeyCol+" = ?", code).First(&redemption).Error)
+		assert.Equal(t, user.Id, redemption.UsedUserId)
+		var row TokenRedemption
+		require.NoError(t, DB.First(&row).Error)
+		assert.Equal(t, TokenRedemption{Id: row.Id, RedemptionId: redemption.Id, UserId: user.Id, TokenId: token.Id, Quota: 500, CreatedAt: row.CreatedAt}, row)
+	})
+
+	t.Run("unlimited token", func(t *testing.T) {
+		user, token := setupTokenRedeemFixture(t, 0, true, common.TokenStatusEnabled)
+		createTokenRedeemCode(t, code, 500, common.RedemptionCodeStatusEnabled, 0)
+
+		result, err := RedeemToToken(code, tokenRedeemTestKey)
+		require.NoError(t, err)
+		assert.True(t, result.Unlimited)
+		assert.Equal(t, 500, result.Quota)
+		snap := takeTokenRedeemSnapshot(t, user.Id, token.Id, code)
+		assert.Equal(t, 1500, snap.userQuota)
+		assert.Equal(t, 0, snap.tokenRemain)
+	})
+
+	t.Run("exhausted token revived", func(t *testing.T) {
+		user, token := setupTokenRedeemFixture(t, 0, false, common.TokenStatusExhausted)
+		createTokenRedeemCode(t, code, 500, common.RedemptionCodeStatusEnabled, 0)
+
+		_, err := RedeemToToken(code, tokenRedeemTestKey)
+		require.NoError(t, err)
+		snap := takeTokenRedeemSnapshot(t, user.Id, token.Id, code)
+		assert.Equal(t, common.TokenStatusEnabled, snap.tokenStatus)
+		assert.Equal(t, 500, snap.tokenRemain)
+	})
+
+	t.Run("negative remain stays unusable but credited", func(t *testing.T) {
+		user, token := setupTokenRedeemFixture(t, -300, false, common.TokenStatusEnabled)
+		createTokenRedeemCode(t, code, 100, common.RedemptionCodeStatusEnabled, 0)
+
+		result, err := RedeemToToken(code, tokenRedeemTestKey)
+		require.NoError(t, err)
+		assert.Equal(t, -200, result.TokenRemainQuota)
+		assert.Equal(t, -200, takeTokenRedeemSnapshot(t, user.Id, token.Id, code).tokenRemain)
+	})
+
+	t.Run("code with surrounding spaces", func(t *testing.T) {
+		user, token := setupTokenRedeemFixture(t, 100, false, common.TokenStatusEnabled)
+		createTokenRedeemCode(t, code, 500, common.RedemptionCodeStatusEnabled, 0)
+
+		_, err := RedeemToToken("  "+code+"\n", tokenRedeemTestKey)
+		require.NoError(t, err)
+		assert.Equal(t, 600, takeTokenRedeemSnapshot(t, user.Id, token.Id, code).tokenRemain)
+	})
+
+	failures := []struct {
+		name  string
+		setup func(t *testing.T) (User, Token)
+		key   string
+	}{
+		{"unknown key", func(t *testing.T) (User, Token) {
+			u, tk := setupTokenRedeemFixture(t, 100, false, common.TokenStatusEnabled)
+			createTokenRedeemCode(t, code, 500, common.RedemptionCodeStatusEnabled, 0)
+			return u, tk
+		}, "tokenredeemkey000000000000000000000000000000999"},
+		{"disabled token", func(t *testing.T) (User, Token) {
+			u, tk := setupTokenRedeemFixture(t, 100, false, common.TokenStatusDisabled)
+			createTokenRedeemCode(t, code, 500, common.RedemptionCodeStatusEnabled, 0)
+			return u, tk
+		}, tokenRedeemTestKey},
+		{"expired token", func(t *testing.T) (User, Token) {
+			u, tk := setupTokenRedeemFixture(t, 100, false, common.TokenStatusEnabled)
+			require.NoError(t, DB.Model(&Token{}).Where("id = ?", tk.Id).Update("expired_time", now-10).Error)
+			createTokenRedeemCode(t, code, 500, common.RedemptionCodeStatusEnabled, 0)
+			return u, tk
+		}, tokenRedeemTestKey},
+		{"disabled user", func(t *testing.T) (User, Token) {
+			u, tk := setupTokenRedeemFixture(t, 100, false, common.TokenStatusEnabled)
+			require.NoError(t, DB.Model(&User{}).Where("id = ?", u.Id).Update("status", common.UserStatusDisabled).Error)
+			createTokenRedeemCode(t, code, 500, common.RedemptionCodeStatusEnabled, 0)
+			return u, tk
+		}, tokenRedeemTestKey},
+		{"unknown code", func(t *testing.T) (User, Token) {
+			return setupTokenRedeemFixture(t, 100, false, common.TokenStatusEnabled)
+		}, tokenRedeemTestKey},
+		{"used code", func(t *testing.T) (User, Token) {
+			u, tk := setupTokenRedeemFixture(t, 100, false, common.TokenStatusEnabled)
+			createTokenRedeemCode(t, code, 500, common.RedemptionCodeStatusUsed, 0)
+			return u, tk
+		}, tokenRedeemTestKey},
+		{"expired code", func(t *testing.T) (User, Token) {
+			u, tk := setupTokenRedeemFixture(t, 100, false, common.TokenStatusEnabled)
+			createTokenRedeemCode(t, code, 500, common.RedemptionCodeStatusEnabled, now-10)
+			return u, tk
+		}, tokenRedeemTestKey},
+		{"disabled code", func(t *testing.T) (User, Token) {
+			u, tk := setupTokenRedeemFixture(t, 100, false, common.TokenStatusEnabled)
+			createTokenRedeemCode(t, code, 500, common.RedemptionCodeStatusDisabled, 0)
+			return u, tk
+		}, tokenRedeemTestKey},
+		{"soft-deleted code", func(t *testing.T) (User, Token) {
+			u, tk := setupTokenRedeemFixture(t, 100, false, common.TokenStatusEnabled)
+			redemption := createTokenRedeemCode(t, code, 500, common.RedemptionCodeStatusEnabled, 0)
+			require.NoError(t, DB.Delete(&redemption).Error)
+			return u, tk
+		}, tokenRedeemTestKey},
+		{"token ceiling exceeded", func(t *testing.T) (User, Token) {
+			u, tk := setupTokenRedeemFixture(t, common.MaxWalletQuota-10, false, common.TokenStatusEnabled)
+			createTokenRedeemCode(t, code, 11, common.RedemptionCodeStatusEnabled, 0)
+			return u, tk
+		}, tokenRedeemTestKey},
+		{"wallet ceiling exceeded", func(t *testing.T) (User, Token) {
+			u, tk := setupTokenRedeemFixture(t, 100, false, common.TokenStatusEnabled)
+			require.NoError(t, DB.Model(&User{}).Where("id = ?", u.Id).Update("quota", common.MaxWalletQuota-10).Error)
+			createTokenRedeemCode(t, code, 11, common.RedemptionCodeStatusEnabled, 0)
+			return u, tk
+		}, tokenRedeemTestKey},
+	}
+	for _, tc := range failures {
+		t.Run(tc.name, func(t *testing.T) {
+			user, token := tc.setup(t)
+			before := takeTokenRedeemSnapshot(t, user.Id, token.Id, code)
+
+			result, err := RedeemToToken(code, tc.key)
+			require.ErrorIs(t, err, ErrTokenRedeemFailed)
+			assert.Nil(t, result)
+			assert.Equal(t, before, takeTokenRedeemSnapshot(t, user.Id, token.Id, code))
+		})
+	}
+
+	t.Run("replay same token", func(t *testing.T) {
+		user, token := setupTokenRedeemFixture(t, 100, false, common.TokenStatusEnabled)
+		createTokenRedeemCode(t, code, 500, common.RedemptionCodeStatusEnabled, 0)
+
+		_, err := RedeemToToken(code, tokenRedeemTestKey)
+		require.NoError(t, err)
+		result, err := RedeemToToken(code, tokenRedeemTestKey)
+		require.NoError(t, err)
+		assert.Equal(t, TokenRedeemResult{Quota: 500, TokenId: token.Id, Unlimited: false, TokenRemainQuota: 600, Replayed: true}, *result)
+		snap := takeTokenRedeemSnapshot(t, user.Id, token.Id, code)
+		assert.Equal(t, 1500, snap.userQuota)
+		assert.Equal(t, 600, snap.tokenRemain)
+		assert.Equal(t, int64(1), snap.rows)
+	})
+
+	t.Run("replay other token of same user", func(t *testing.T) {
+		user, token := setupTokenRedeemFixture(t, 100, false, common.TokenStatusEnabled)
+		createTokenRedeemCode(t, code, 500, common.RedemptionCodeStatusEnabled, 0)
+		other := Token{UserId: user.Id, Key: "tokenredeemkey000000000000000000000000000000002", Name: "other", Status: common.TokenStatusEnabled, RemainQuota: 100, ExpiredTime: -1}
+		require.NoError(t, DB.Create(&other).Error)
+
+		_, err := RedeemToToken(code, tokenRedeemTestKey)
+		require.NoError(t, err)
+		result, err := RedeemToToken(code, other.Key)
+		require.ErrorIs(t, err, ErrTokenRedeemFailed)
+		assert.Nil(t, result)
+		assert.Equal(t, 1500, takeTokenRedeemSnapshot(t, user.Id, token.Id, code).userQuota)
+		assert.Equal(t, 100, takeTokenRedeemSnapshot(t, user.Id, other.Id, code).tokenRemain)
+	})
+}
+
+func TestRedeemToTokenSyncsCaches(t *testing.T) {
+	const code = "20000000000000000000000000000002"
+	user, token := setupTokenRedeemFixture(t, 100, false, common.TokenStatusEnabled)
+	createTokenRedeemCode(t, code, 500, common.RedemptionCodeStatusEnabled, 0)
+	useUserCacheMiniRedis(t)
+
+	cachedToken, err := GetTokenByKey(tokenRedeemTestKey, false)
+	require.NoError(t, err)
+	require.Equal(t, 100, cachedToken.RemainQuota)
+	cachedQuota, err := GetUserQuota(user.Id, false)
+	require.NoError(t, err)
+	require.Equal(t, 1000, cachedQuota)
+
+	_, err = RedeemToToken(code, tokenRedeemTestKey)
+	require.NoError(t, err)
+
+	cachedToken, err = GetTokenByKey(tokenRedeemTestKey, false)
+	require.NoError(t, err)
+	assert.Equal(t, 600, cachedToken.RemainQuota)
+	assert.Equal(t, token.Id, cachedToken.Id)
+	cachedQuota, err = GetUserQuota(user.Id, false)
+	require.NoError(t, err)
+	assert.Equal(t, 1500, cachedQuota)
+}
