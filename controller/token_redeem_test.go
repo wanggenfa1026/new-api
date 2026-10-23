@@ -6,7 +6,9 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/i18n"
@@ -206,6 +208,39 @@ func TestRedeemToTokenLockoutDoesNotRevealKeyExistence(t *testing.T) {
 			var code model.Redemption
 			require.NoError(t, model.DB.Where("name = ?", "ctrl").First(&code).Error)
 			assert.Equal(t, common.RedemptionCodeStatusEnabled, code.Status, "a locked key must not consume the code")
+		})
+	}
+}
+
+func TestRedeemToTokenLockoutHoldsUnderParallelAttempts(t *testing.T) {
+	for _, withRedis := range []bool{false, true} {
+		t.Run(fmt.Sprintf("redis=%v", withRedis), func(t *testing.T) {
+			engine := setupTokenRedeemController(t, withRedis)
+			createTokenRedeemControllerToken(t, tokenRedeemControllerKey, false, common.TokenStatusEnabled)
+			// Every attempt waits like the production delay, so all of them are in flight together.
+			tokenRedeemDelay = func() { time.Sleep(100 * time.Millisecond) }
+
+			const attempts = 10
+			statuses := make([]int, attempts)
+			var wg sync.WaitGroup
+			for i := range attempts {
+				wg.Go(func() {
+					statuses[i] = postTokenRedeem(engine, "Bearer sk-"+tokenRedeemControllerKey, tokenRedeemCodeBody("36000000000000000000000000000009")).Code
+				})
+			}
+			wg.Wait()
+
+			processed, locked := 0, 0
+			for _, status := range statuses {
+				switch status {
+				case http.StatusOK:
+					processed++
+				case http.StatusTooManyRequests:
+					locked++
+				}
+			}
+			assert.Equal(t, tokenRedeemMaxFailures, processed, "only the first attempts within the limit may reach the redemption")
+			assert.Equal(t, attempts-tokenRedeemMaxFailures, locked)
 		})
 	}
 }

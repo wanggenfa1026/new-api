@@ -25,12 +25,15 @@ const (
 // long the reply takes. Tests replace it with a no-op.
 var tokenRedeemDelay = common.RandomSleep
 
-// tokenRedeemLocks counts failed attempts per submitted key. It is keyed by the
-// HMAC of whatever key was sent, existing or not, so a made-up key locks out
-// exactly like a real one and the lockout reveals nothing about which keys exist.
+// tokenRedeemLocks counts attempts per submitted key. It is keyed by the HMAC
+// of whatever key was sent, existing or not, so a made-up key locks out exactly
+// like a real one and the lockout reveals nothing about which keys exist.
+// An attempt is counted before it runs and the count is cleared on success, so
+// attempts sent in parallel cannot all slip past the limit before the first
+// failure is recorded.
 var tokenRedeemLocks = newTokenRedeemLimiter()
 
-// tokenRedeemCountScript increments the failure counter and starts its window
+// tokenRedeemCountScript increments the attempt counter and starts its window
 // in one step, so a counter can never be left without an expiry.
 const tokenRedeemCountScript = `
 local count = redis.call('INCR', KEYS[1])
@@ -45,7 +48,7 @@ type tokenRedeemLimiter struct {
 }
 
 type tokenRedeemAttempts struct {
-	failures    int
+	attempts    int
 	windowEnd   int64
 	lockedUntil int64
 }
@@ -54,43 +57,41 @@ func newTokenRedeemLimiter() *tokenRedeemLimiter {
 	return &tokenRedeemLimiter{entries: make(map[string]tokenRedeemAttempts)}
 }
 
-// lockedFor returns how many seconds the key stays locked, or 0.
-func (l *tokenRedeemLimiter) lockedFor(keyHash string) int64 {
-	if common.RedisEnabled {
-		ttl, err := common.RDB.TTL(context.Background(), "token_redeem:lock:"+keyHash).Result()
-		if err != nil || ttl <= 0 {
-			return 0
-		}
-		return max(1, int64(ttl/time.Second))
-	}
-	now := time.Now().Unix()
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return max(0, l.entries[keyHash].lockedUntil-now)
-}
-
-func (l *tokenRedeemLimiter) fail(keyHash string) {
+// reserve counts one attempt for the key and returns how many seconds the key
+// stays locked, or 0 when the attempt may proceed. The attempt past the limit
+// starts the lock. When Redis errors the attempt is allowed: the per-IP limit
+// still applies.
+func (l *tokenRedeemLimiter) reserve(keyHash string) int64 {
 	if common.RedisEnabled {
 		ctx := context.Background()
-		failKey := "token_redeem:fail:" + keyHash
-		count, err := common.RDB.Eval(ctx, tokenRedeemCountScript, []string{failKey}, tokenRedeemWindowSeconds).Int64()
-		if err != nil || count < tokenRedeemMaxFailures {
-			return
+		lockKey := "token_redeem:lock:" + keyHash
+		if ttl, err := common.RDB.TTL(ctx, lockKey).Result(); err == nil && ttl > 0 {
+			return max(1, int64(ttl/time.Second))
 		}
-		common.RDB.Set(ctx, "token_redeem:lock:"+keyHash, 1, tokenRedeemWindowSeconds*time.Second)
-		common.RDB.Del(ctx, failKey)
-		return
+		countKey := "token_redeem:fail:" + keyHash
+		count, err := common.RDB.Eval(ctx, tokenRedeemCountScript, []string{countKey}, tokenRedeemWindowSeconds).Int64()
+		if err != nil || count <= tokenRedeemMaxFailures {
+			return 0
+		}
+		common.RDB.Set(ctx, lockKey, 1, tokenRedeemWindowSeconds*time.Second)
+		common.RDB.Del(ctx, countKey)
+		return tokenRedeemWindowSeconds
 	}
 	now := time.Now().Unix()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	entry := l.entries[keyHash]
+	if entry.lockedUntil > now {
+		return entry.lockedUntil - now
+	}
 	if entry.windowEnd <= now {
 		entry = tokenRedeemAttempts{windowEnd: now + tokenRedeemWindowSeconds}
 	}
-	entry.failures++
-	if entry.failures >= tokenRedeemMaxFailures {
+	entry.attempts++
+	locked := int64(0)
+	if entry.attempts > tokenRedeemMaxFailures {
 		entry = tokenRedeemAttempts{windowEnd: now + tokenRedeemWindowSeconds, lockedUntil: now + tokenRedeemWindowSeconds}
+		locked = tokenRedeemWindowSeconds
 	}
 	l.entries[keyHash] = entry
 	// Random keys can only arrive as fast as the per-IP limit allows; still drop
@@ -102,8 +103,10 @@ func (l *tokenRedeemLimiter) fail(keyHash string) {
 			}
 		}
 	}
+	return locked
 }
 
+// reset clears the attempt count after a successful redemption.
 func (l *tokenRedeemLimiter) reset(keyHash string) {
 	if common.RedisEnabled {
 		common.RDB.Del(context.Background(), "token_redeem:fail:"+keyHash)
@@ -131,7 +134,7 @@ func RedeemToToken(c *gin.Context) {
 	key, _, _ = strings.Cut(key, "-")
 
 	keyHash := common.GenerateHMAC(key)
-	if remaining := tokenRedeemLocks.lockedFor(keyHash); remaining > 0 {
+	if remaining := tokenRedeemLocks.reserve(keyHash); remaining > 0 {
 		c.Header("Retry-After", strconv.FormatInt(remaining, 10))
 		c.AbortWithStatus(http.StatusTooManyRequests)
 		return
@@ -149,8 +152,7 @@ func RedeemToToken(c *gin.Context) {
 	}
 	result, err := model.RedeemToToken(req.Code, key)
 	if err != nil {
-		tokenRedeemLocks.fail(keyHash)
-		// The reason never contains the key or the code.
+		// The attempt stays counted. The reason never contains the key or the code.
 		logger.LogWarn(c, common.LogText("token redemption failed: %s", err.Error()))
 		common.ApiErrorT(c, "Redemption failed, please try again later")
 		return

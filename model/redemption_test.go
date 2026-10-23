@@ -431,6 +431,20 @@ func TestRedeemToToken(t *testing.T) {
 	})
 }
 
+func TestRedeemToTokenFailedAttemptKeepsTokenCache(t *testing.T) {
+	setupTokenRedeemFixture(t, 100, false, common.TokenStatusEnabled)
+	server := useUserCacheMiniRedis(t)
+	_, err := GetTokenByKey(tokenRedeemTestKey, false)
+	require.NoError(t, err)
+	require.True(t, server.Exists(getTokenCacheKey(tokenRedeemTestKey)))
+
+	_, err = RedeemToToken("20000000000000000000000000000009", tokenRedeemTestKey)
+	require.ErrorIs(t, err, ErrTokenRedeemFailed)
+
+	assert.True(t, server.Exists(getTokenCacheKey(tokenRedeemTestKey)), "a wrong code must not evict the key's cache")
+	assert.False(t, server.Exists(getTokenCacheFenceKey(tokenRedeemTestKey)), "a wrong code must not fence the key's cache")
+}
+
 func TestRedeemToTokenSyncsCaches(t *testing.T) {
 	const code = "20000000000000000000000000000002"
 	user, token := setupTokenRedeemFixture(t, 100, false, common.TokenStatusEnabled)

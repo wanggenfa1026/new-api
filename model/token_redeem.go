@@ -67,12 +67,6 @@ func RedeemToToken(code string, key string) (*TokenRedeemResult, error) {
 	if err := DB.Select("id", "status").First(&owner, "id = ?", token.UserId).Error; err != nil || owner.Status != common.UserStatusEnabled {
 		return nil, tokenRedeemFailure("token owner not usable")
 	}
-	if !token.UnlimitedQuota {
-		// Raise the fence before writing so no reader republishes the old balance.
-		if err := invalidateTokenCacheForMutation(token.Key); err != nil {
-			return nil, tokenRedeemFailure("token cache invalidation failed: " + err.Error())
-		}
-	}
 
 	result := &TokenRedeemResult{TokenId: token.Id, Unlimited: token.UnlimitedQuota}
 	redemptionId := 0
@@ -124,6 +118,12 @@ func RedeemToToken(code string, key string) (*TokenRedeemResult, error) {
 			if err := common.ValidateWalletQuota(current.RemainQuota + redemption.Quota); err != nil {
 				return err
 			}
+			// Only now that the code is claimed: raise the fence and drop the cached
+			// key so no reader republishes the old balance. A failed attempt must not
+			// disturb the cache of a key it cannot credit.
+			if err := invalidateTokenCacheForMutation(token.Key); err != nil {
+				return err
+			}
 			// Not increaseTokenQuota: that also lowers used_quota, which is refund semantics.
 			credited := tx.Model(&Token{}).
 				Where("id = ? AND user_id = ? AND status IN ?", token.Id, token.UserId, []int{common.TokenStatusEnabled, common.TokenStatusExhausted}).
@@ -148,6 +148,13 @@ func RedeemToToken(code string, key string) (*TokenRedeemResult, error) {
 	}
 
 	if !result.Replayed {
+		if !token.UnlimitedQuota {
+			// The fence lasts 10 seconds; a transaction that waited longer on row
+			// locks could let a reader cache the pre-commit balance, so drop it again.
+			if err := invalidateTokenCacheForMutation(token.Key); err != nil {
+				common.SysError(common.LogText("failed to invalidate token cache after redemption: %s", err.Error()))
+			}
+		}
 		syncCreditUserQuotaCache(token.UserId, result.Quota, common.LogText("token redemption"))
 		RecordLog(token.UserId, LogTypeTopup, common.NewMessage("Topped up {{quota}} with a redemption code, code ID {{id}}", map[string]any{"quota": logger.FormatQuota(result.Quota), "id": redemptionId}))
 	}
