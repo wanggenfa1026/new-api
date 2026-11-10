@@ -25,6 +25,7 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 	info.InitChannelMeta(c)
 	info.BillingImageCount = nil
 	info.ImageRequestCount = 0
+	info.OutboundImageFormN = nil
 
 	imageReq, ok := info.Request.(*dto.ImageRequest)
 	if !ok {
@@ -84,6 +85,14 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 		switch convertedRequest.(type) {
 		case *bytes.Buffer:
 			requestBody = convertedRequest.(io.Reader)
+			// A multipart body is already overridden by the adaptor; bill the
+			// quantity it sends, like the JSON path below.
+			if info.OutboundImageFormN != nil {
+				imageCount, err = (&dto.ImageRequest{N: info.OutboundImageFormN}).ImageCount(false)
+				if err != nil {
+					return types.NewErrorWithStatusCode(err, types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+				}
+			}
 		default:
 			jsonData, err = common.Marshal(convertedRequest)
 			if err != nil {

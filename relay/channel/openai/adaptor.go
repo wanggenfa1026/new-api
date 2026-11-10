@@ -11,6 +11,7 @@ import (
 	"net/textproto"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -542,7 +543,21 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 
 		// 写入所有非文件字段
 		if mf != nil {
-			for key, values := range mf.Value {
+			// The channel parameter override applies to the text fields; the
+			// overridden n is the quantity this attempt must be billed for.
+			fields, err := relaycommon.ApplyParamOverrideToFormValues(mf.Value, info)
+			if err != nil {
+				return nil, err
+			}
+			info.OutboundImageFormN = nil
+			if n := fields["n"]; len(n) == 1 {
+				count, err := strconv.ParseUint(n[0], 10, 32)
+				if err != nil {
+					return nil, fmt.Errorf("invalid image n %q: %w", n[0], err)
+				}
+				info.OutboundImageFormN = common.GetPointer(uint(count))
+			}
+			for key, values := range fields {
 				if key == "model" {
 					continue
 				}

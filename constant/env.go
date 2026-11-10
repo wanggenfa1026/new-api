@@ -16,6 +16,12 @@ var NotifyLimitCount int
 var NotificationLimitDurationMinute int
 var GenerateDefaultToken bool
 var ErrorLogEnabled bool
+
+// StrictImageResponse makes the OpenAI image relay reject a 2xx upstream
+// response that carries an error object, is not JSON, or holds no image
+// payload as a retryable upstream failure, so the request moves to the next
+// channel and nothing is charged for a response without an image.
+var StrictImageResponse bool
 var TaskQueryLimit int
 var TaskTimeoutMinutes int
 var TaskPollMaxFailures = 20

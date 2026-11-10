@@ -15,6 +15,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -591,6 +592,72 @@ func TestOpenaiImageHandlersReturnJSONError(t *testing.T) {
 		require.Equal(t, "content moderation failed", err.ToOpenAIError().Message)
 		require.Empty(t, recorder.Body.String())
 		require.NotContains(t, recorder.Header().Get("Content-Type"), "text/event-stream")
+	})
+}
+
+// TestOpenaiImageHandlerStrictResponse covers STRICT_IMAGE_RESPONSE: a 2xx
+// upstream response that carries an error object, is not JSON, or holds no
+// image payload becomes a retryable 502 before anything is written to the
+// client, while a response with an image is still forwarded and counted.
+func TestOpenaiImageHandlerStrictResponse(t *testing.T) {
+	oldMode := gin.Mode()
+	gin.SetMode(gin.TestMode)
+	oldStrict := constant.StrictImageResponse
+	constant.StrictImageResponse = true
+	t.Cleanup(func() {
+		gin.SetMode(oldMode)
+		constant.StrictImageResponse = oldStrict
+	})
+
+	rejected := []struct {
+		name     string
+		body     string
+		wantCode types.ErrorCode
+	}{
+		{"empty data", `{"created":1,"data":[]}`, types.ErrorCodeEmptyResponse},
+		{"entries without image payload", `{"data":[{"revised_prompt":"draw a cat"}]}`, types.ErrorCodeEmptyResponse},
+		{"error object in a 200 body", `{"error":{"message":"content moderation failed","type":"upstream_error","code":"content_moderation_failed"}}`, types.ErrorCode("content_moderation_failed")},
+		{"body is not JSON", `<html><body>502 Bad Gateway</body></html>`, types.ErrorCodeBadResponse},
+	}
+	for _, tt := range rejected {
+		t.Run(tt.name, func(t *testing.T) {
+			c, recorder, resp, info := newImageTestContext(t, tt.body, "application/json", false)
+			info.PriceData.UsePrice = true
+			info.PriceData.AddOtherRatio("n", 3)
+
+			usage, err := OpenaiImageHandler(c, info, resp)
+
+			require.Nil(t, usage)
+			require.NotNil(t, err)
+			assert.Equal(t, http.StatusBadGateway, err.StatusCode)
+			assert.Equal(t, tt.wantCode, err.GetErrorCode())
+			assert.False(t, types.IsSkipRetryError(err))
+			assert.Empty(t, recorder.Body.String())
+		})
+	}
+
+	t.Run("response with an image is forwarded and counted", func(t *testing.T) {
+		body := `{"data":[{"url":"https://example.com/a.png"}]}`
+		c, recorder, resp, info := newImageTestContext(t, body, "application/json", false)
+		info.PriceData.UsePrice = true
+		info.PriceData.AddOtherRatio("n", 3)
+
+		_, err := OpenaiImageHandler(c, info, resp)
+
+		require.Nil(t, err)
+		assert.Equal(t, float64(1), info.PriceData.OtherRatios()["n"])
+		assert.Equal(t, body, recorder.Body.String())
+	})
+
+	t.Run("upstream error status is kept", func(t *testing.T) {
+		body := `{"error":{"message":"rate limited","type":"upstream_error","code":"rate_limited"}}`
+		c, _, resp, info := newImageTestContext(t, body, "application/json", false)
+		resp.StatusCode = http.StatusTooManyRequests
+
+		_, err := OpenaiImageHandler(c, info, resp)
+
+		require.NotNil(t, err)
+		assert.Equal(t, http.StatusTooManyRequests, err.StatusCode)
 	})
 }
 

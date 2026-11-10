@@ -181,6 +181,10 @@ type RelayInfo struct {
 	// ImageQuotaBeforeGroup is the frozen legacy estimate before request ratios.
 	ImageRequestCount     int
 	ImageQuotaBeforeGroup float64
+	// OutboundImageFormN is the n field of the multipart image request sent on
+	// the current attempt, after the channel parameter override. It is nil when
+	// the attempt sends no multipart n.
+	OutboundImageFormN *uint
 
 	Request dto.Request
 
