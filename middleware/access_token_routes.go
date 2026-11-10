@@ -249,6 +249,14 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"GET /api/data/flow":                        accessTokenScopeRule("log:read"),
 	"GET /api/data/flow/self":                   accessTokenScopeRule("usage:read"),
 
+	// router/api-router.go: /api/profit. Revenue, upstream cost and margin are
+	// for a signed-in administrator only; no access token reaches them.
+	"GET /api/profit/summary":   accessTokenSessionRule,
+	"GET /api/profit/report":    accessTokenSessionRule,
+	"GET /api/profit/costs":     accessTokenSessionRule,
+	"PUT /api/profit/costs":     accessTokenSessionRule,
+	"PUT /api/profit/token/:id": accessTokenSessionRule,
+
 	// router/api-router.go: /api/group, /api/prefill_group
 	"GET /api/group/":               accessTokenScopeRule("group:read"),
 	"GET /api/prefill_group/":       accessTokenScopeRule("group:read"),

@@ -185,6 +185,9 @@ type RelayInfo struct {
 	// the current attempt, after the channel parameter override. It is nil when
 	// the attempt sends no multipart n.
 	OutboundImageFormN *uint
+	// ReturnedImageCount is how many images the upstream response carried. It
+	// is reported for reconciliation and never changes the charge.
+	ReturnedImageCount int
 
 	Request dto.Request
 
@@ -254,6 +257,19 @@ func (info *RelayInfo) UpdateImageCount(count int64) {
 		n := int(count)
 		info.BillingImageCount = &n
 	}
+}
+
+// SettledImageCount is the image quantity a request is billed for at
+// settlement: the count the handler derived from the upstream response when
+// it did, otherwise the reserved quantity.
+func (info *RelayInfo) SettledImageCount() int {
+	if info.BillingImageCount != nil {
+		return *info.BillingImageCount
+	}
+	if count, ok := info.PriceData.OtherRatios()["n"]; ok && info.PriceData.UsePrice && count >= 1 && count <= dto.MaxImageN {
+		return common.QuotaRound(count)
+	}
+	return info.RequestedImageCount()
 }
 
 func (info *RelayInfo) RequestedImageCount() int {

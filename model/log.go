@@ -334,9 +334,26 @@ type RecordConsumeLogParams struct {
 	IsStream         bool              `json:"is_stream"`
 	Group            string            `json:"group"`
 	Other            *LogOther         `json:"other"`
+	// ImageCount is the quantity an image request was billed for and
+	// ReturnedImageCount the images the upstream returned; both are zero for
+	// requests that are not image requests. They only feed profit statistics.
+	ImageCount         int `json:"image_count,omitempty"`
+	ReturnedImageCount int `json:"returned_image_count,omitempty"`
 }
 
 func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams) {
+	createdAt := common.GetTimestamp()
+	cost, costed := RecordProfit(ProfitRecordParams{
+		CreatedAt:     createdAt,
+		UserId:        userId,
+		TokenId:       params.TokenId,
+		TokenName:     params.TokenName,
+		ChannelId:     params.ChannelId,
+		ModelName:     params.ModelName,
+		Quota:         params.Quota,
+		BilledCount:   params.ImageCount,
+		ReturnedCount: params.ReturnedImageCount,
+	})
 	if !common.LogConsumeEnabled {
 		return
 	}
@@ -344,8 +361,15 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	username := c.GetString("username")
 	requestId := c.GetString(common.RequestIdKey)
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
-	createdAt := common.GetTimestamp()
 	other := params.Other
+	// Cost and profit are administrator-only: log views for the key holder
+	// drop admin_info.
+	if costed {
+		other.MergeAdmin(map[string]any{"upstream_cost": cost, "profit": params.Quota - cost})
+	}
+	if params.ReturnedImageCount > 0 {
+		other.SetAdmin("returned_image_count", params.ReturnedImageCount)
+	}
 	content := other.setContent(params.Content)
 	otherStr := other.JSONString()
 	// 判断是否需要记录 IP

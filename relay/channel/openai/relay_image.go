@@ -54,6 +54,7 @@ func OpenaiImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 		return nil, types.NewOpenAIError(errors.New("upstream returned no image"), types.ErrorCodeEmptyResponse, http.StatusBadGateway)
 	}
 	info.UpdateImageCount(imageCount)
+	info.ReturnedImageCount = int(min(imageCount, int64(dto.MaxImageN)))
 
 	// 写入新的 response body
 	service.IOCopyBytesGracefully(c, resp, responseBody)

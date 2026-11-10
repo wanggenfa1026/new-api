@@ -351,6 +351,8 @@ func migrateDB() error {
 		&LoginEncryptionKey{},
 		&Redemption{},
 		&TokenRedemption{},
+		&ChannelCost{},
+		&ProfitDaily{},
 		&Ability{},
 		&Log{},
 		&Midjourney{},

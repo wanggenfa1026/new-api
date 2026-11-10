@@ -50,6 +50,7 @@ import { Button } from '@/components/ui/button'
 import { IconBadge, type IconBadgeTone } from '@/components/ui/icon-badge'
 import { fetchTokenKey, getApiKeys } from '@/features/keys/api'
 import type { ApiKey } from '@/features/keys/types'
+import { ProfitSummaryPanel } from '@/features/profit/components/profit-summary-panel'
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 import { getUserModels } from '@/lib/api'
 import { handleServerError } from '@/lib/handle-server-error'
@@ -788,6 +789,8 @@ export function OverviewDashboard() {
           )}
 
           <SummaryCards />
+
+          {isAdmin && <ProfitSummaryPanel />}
 
           {showContentPanels && (
             <CardStaggerContainer

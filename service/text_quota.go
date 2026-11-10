@@ -528,19 +528,25 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 
 	attachQuotaSaturation(ctx, relayInfo, other)
 
+	imageCount := 0
+	if relayInfo.RelayMode == relayconstant.RelayModeImagesGenerations || relayInfo.RelayMode == relayconstant.RelayModeImagesEdits {
+		imageCount = relayInfo.SettledImageCount()
+	}
 	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{
-		ChannelId:        relayInfo.ChannelId,
-		PromptTokens:     summary.PromptTokens,
-		CompletionTokens: summary.CompletionTokens,
-		ModelName:        logModel,
-		TokenName:        summary.TokenName,
-		Quota:            summary.Quota,
-		Content:          extraContent,
-		TokenId:          relayInfo.TokenId,
-		UseTimeSeconds:   int(summary.UseTimeSeconds),
-		IsStream:         relayInfo.IsStream,
-		Group:            relayInfo.UsingGroup,
-		Other:            other,
+		ChannelId:          relayInfo.ChannelId,
+		PromptTokens:       summary.PromptTokens,
+		CompletionTokens:   summary.CompletionTokens,
+		ModelName:          logModel,
+		TokenName:          summary.TokenName,
+		Quota:              summary.Quota,
+		Content:            extraContent,
+		TokenId:            relayInfo.TokenId,
+		UseTimeSeconds:     int(summary.UseTimeSeconds),
+		IsStream:           relayInfo.IsStream,
+		Group:              relayInfo.UsingGroup,
+		Other:              other,
+		ImageCount:         imageCount,
+		ReturnedImageCount: relayInfo.ReturnedImageCount,
 	})
 	relayInfo.PerformanceOutputTokens = int64(summary.CompletionTokens)
 }

@@ -32,6 +32,8 @@ type Token struct {
 	DeletedAt          gorm.DeletedAt `gorm:"index"`
 	// 允许用此令牌查询所属用户的额度；新建令牌默认开启，已有令牌升级后保持关闭
 	AllowUserQuotaQuery bool `json:"allow_user_quota_query"`
+	// 不计入利润统计（测试、内部用的令牌）；只能由管理员通过利润统计接口修改
+	ProfitExcluded bool `json:"profit_excluded"`
 }
 
 func (token *Token) GetAutoGroups() ([]string, error) {

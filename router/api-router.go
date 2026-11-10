@@ -349,6 +349,16 @@ func SetApiRouter(router *gin.Engine) {
 			systemInfoRoute.DELETE("/instances/:node_name", controller.DeleteStaleSystemInstance)
 		}
 
+		profitRoute := apiRouter.Group("/profit")
+		profitRoute.Use(middleware.AdminAuth())
+		{
+			profitRoute.GET("/summary", controller.GetProfitSummary)
+			profitRoute.GET("/report", controller.GetProfitReport)
+			profitRoute.GET("/costs", controller.GetProfitChannelCosts)
+			profitRoute.PUT("/costs", controller.UpdateProfitChannelCosts)
+			profitRoute.PUT("/token/:id", controller.UpdateTokenProfitExcluded)
+		}
+
 		dataRoute := apiRouter.Group("/data")
 		dataRoute.GET("/", middleware.AdminAuth(), controller.GetAllQuotaDates)
 		dataRoute.GET("/users", middleware.AdminAuth(), controller.GetQuotaDatesByUser)
